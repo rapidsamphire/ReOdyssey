@@ -1,0 +1,14 @@
+[project]
+sdk_version = "0.8.0.0"
+name = "reodyssey"
+
+[entrypoint]
+file_path = "assets/default.xex"
+out_directory_path = "generated"
+includes = [
+  "reodyssey_config.toml",
+]
+
+setjmp_address = 0x82DF34A0
+longjmp_address = 0x82DF3060
+
