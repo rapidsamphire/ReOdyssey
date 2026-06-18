@@ -39,7 +39,7 @@ REXCVAR_DEFINE_BOOL(lo_patch_disable_depth_of_field, false, "Lost Odyssey/Patche
 REXCVAR_DEFINE_BOOL(lo_patch_disable_motion_blur, false, "Lost Odyssey/Patches",
                     "Disable motion blur.");
 REXCVAR_DEFINE_BOOL(lo_patch_anisotropic_filtering_16x, false, "Lost Odyssey/Patches",
-                    "Force the guest anisotropic filtering level to 16x.");
+                    "Force the anisotropic filtering level to 16x.");
 REXCVAR_DEFINE_BOOL(lo_patch_disable_dynamic_shadows, false, "Lost Odyssey/Patches",
                     "Disable dynamic shadow rendering paths.");
 REXCVAR_DEFINE_BOOL(lo_patch_partial_debug_menu, false, "Lost Odyssey/Patches",

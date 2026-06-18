@@ -28,6 +28,7 @@ lstrcmpiA = 0x827C9F80
 [functions]
 0x82367A68 = {} 
 0x8294ec98 = {}
+0x822B5450 = {}
 0x82290008 = { name = "rex_Tick_FEngineLoop_QAAXXZ" }
 0x82290778 = { name = "rex_FlushThreadedLogs_FOutputDeviceRedirector_UAAXXZ" }
 0x822907C8 = { name = "rex_UnsynchronizedFlushThreadedLogs_FOutputDeviceRedirector_AAAXXZ" }
@@ -549,6 +550,7 @@ lstrcmpiA = 0x827C9F80
 0x823D63E0 = { name = "rex_Sort_PAVFProjectedShadowInfo_VCompareShadowRenderingFProjectedShadowInfoPointer_YAXPAPAVFProjectedShadowInfo_H_Z" }
 0x823D6740 = { name = "rex_AddSurfaceInner_FTextureLayout_AAAHHII_N_Z" }
 0x823D7C40 = { name = "rex_RenderProjection_FProjectedShadowInfo_QBAXPBVFViewInfo_E_Z" }
+0x823D8658 = { name = "rex_RHISetStencilState" }
 0x823D9980 = { name = "rex_RHISetScissorRect_YAXIIIII_Z" }
 0x823D9A10 = { name = "rex_RenderLightFunction_FSceneRenderer_AAAIPBVFLightSceneInfo_I_Z" }
 0x823D9E48 = { name = "rex_RHICopyFromResolveTarget_YAXABVFSurfaceRHIRef_Z" }
@@ -595,6 +597,7 @@ lstrcmpiA = 0x827C9F80
 0x823F13C8 = { name = "rex_Release_CCalBase_UAAKXZ" }
 0x823F1458 = { name = "rex_UnlockResource_D3D_YAXPAUD3DResource_PAX1_Z" }
 0x823F2110 = { name = "rex_CopyToCachedMemory_D3D_YAXPAXPBXK_Z_0" }
+0x823F2428 = { name = "rex_FXeVertexShader_Init" }
 0x823F2588 = { name = "rex_XGGetMicrocodeShaderParts" }
 0x823F26E0 = { name = "rex_XGRegisterVertexShader" }
 0x823F27D8 = { name = "rex_D3DVertexShader_Bind" }
@@ -1100,6 +1103,7 @@ lstrcmpiA = 0x827C9F80
 0x824847F0 = { name = "rex_IsDrive_FFileManagerGeneric_MAAIPB_W_Z" }
 0x82484F58 = { name = "rex_GVinylSystemAllocator_UAAPAXI_Z" }
 0x82485340 = { name = "rex_GetWantedMips_FStreamingHandlerTextureLastRender_UAAHPAVUTexture2D_ABV_TArray_UFStreamingViewInfo_07_MH_Z" }
+0x824856A0 = { name = "rex_XexCommitCodeBuffer_DrainLoop", skip_msr = true }
 0x824858F8 = { name = "rex_XexCommitCodeBuffer" }
 0x82485920 = { name = "rex_StartRenderingThread_YAXXZ" }
 0x82485A08 = { name = "rex_StopRenderingThread_YAXXZ" }
@@ -1212,6 +1216,7 @@ lstrcmpiA = 0x827C9F80
 0x8249A7A0 = { name = "rex_AddReferencedObject_UObject_SAXAAV_TArray_PAVUObject_07_PAV1_Z" }
 0x8249B130 = { name = "rex_EmitStructArrayBegin_UClass_QAAKHH_Z" }
 0x8249B1A8 = { name = "rex_AssembleReferenceTokenStream_UClass_QAAXXZ" }
+0x8249B2B8 = { name = "rex_FXePixelShader_Init" }
 0x8249B448 = { name = "rex_EFXePixelShader_UAAPAXI_Z" }
 0x8249B4A8 = { name = "rex__8FShaderCombinationKey_QAAIABV0_Z" }
 0x8249B640 = { name = "rex__1_TArray_VTPair_TMapBase_VFShaderCombinationKey_PAUFCachedVertexShader_07_QAA_XZ" }
@@ -9824,6 +9829,7 @@ lstrcmpiA = 0x827C9F80
 0x82E43DF8 = { name = "rex_setRestitutionCombineMode_NpMaterial_UAAXW4NxCombineMode_Z" }
 0x82E43EE0 = { name = "rex__4WheelContact_WheelShape_QAAAAU01_ABU01_Z" }
 0x82E43FB0 = { name = "rex__1CCDTest_QAA_XZ" }
+0x82E44048 = {}
 0x82E44068 = { name = "rex_removePairFlags_Scene_UAAXAAVNvShape_Z" }
 0x82E44110 = { name = "rex_convertPruningType" }
 0x82E44238 = { name = "rex_prepareEffectors_Scene_AAAXXZ" }
@@ -10938,6 +10944,7 @@ lstrcmpiA = 0x827C9F80
 0x82F4C758 = { name = "rex_destroyV_PxsContext_UAAXXZ" }
 0x82F4C7D0 = { name = "rex_createCustomConstraintV_PxsContext_UAAPAVPxnCustomConstraint_ABUPxdConstraintDesc_Z" }
 0x82F4C8B8 = { name = "rex_updateBroadPhaseV_PxsContext_UAAIXZ" }
+0x82F4C888 = {}
 0x82F4C890 = {}
 0x82F4C968 = { name = "rex_upaateDynamicsV_PxsContext_UAAIM_Z" }
 0x82F4CA48 = { name = "rex_markActive_PxsContext_QAAXPAVPxsContactManager_Z" }
@@ -13743,6 +13750,7 @@ lstrcmpiA = 0x827C9F80
 0x830D5568 = {}
 0x830D5578 = {}
 0x830D5588 = {}
+0x825AF230 = {}
 0x830D5598 = {}
 0x830D55A8 = {}
 0x830D55B8 = {}
@@ -14222,6 +14230,7 @@ lstrcmpiA = 0x827C9F80
 0x8312A200 = { name = "rex_decodeB_2Pass_EMB_PassIntra" }
 0x8312A600 = { name = "rex_decodeB_2Pass_EMB_Pass1" }
 0x829B8110 = {}
+0x82520660 = {}
 
 [[midasm_hook]]
 address = 0x827B4A0C
@@ -14346,3 +14355,122 @@ address = 0x823007AC
 name = "LoPatchAspectRatioFovScaleHook"
 registers = ["f0"]
 after_instruction = true
+
+[[midasm_hook]]
+address = 0x82291E14
+name = "LoMouseSupportViewportPreHook"
+registers = ["r3", "f1"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x82291E18
+name = "LoMouseSupportViewportPostHook"
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x828E1120
+name = "LoMouseSupportScrollListHoverHook"
+registers = ["r3"]
+
+[[midasm_hook]]
+address = 0x828DB1F8
+name = "LoMouseSupportUiListRows36Hook"
+registers = ["r3"]
+
+[[midasm_hook]]
+address = 0x828DD6B0
+name = "LoMouseSupportUiListRows32AHook"
+registers = ["r3"]
+
+[[midasm_hook]]
+address = 0x828D9580
+name = "LoMouseSupportUiListRows32BHook"
+registers = ["r3"]
+
+[[midasm_hook]]
+address = 0x82329488
+name = "LoMouseSupportGenericListHoverHook"
+registers = ["r3"]
+
+[[midasm_hook]]
+address = 0x8232A058
+name = "LoMouseSupportCompactListHoverHook"
+registers = ["r3"]
+
+[[midasm_hook]]
+address = 0x822DC550
+name = "LoMouseSupportChoiceMenuHoverHook"
+registers = ["r3"]
+
+[[midasm_hook]]
+address = 0x823A0498
+name = "LoMouseSupportStandardRows204Hook"
+registers = ["r3"]
+
+[[midasm_hook]]
+address = 0x8233D4D8
+name = "LoMouseSupportDirectRows236RangeHook"
+registers = ["r3"]
+
+[[midasm_hook]]
+address = 0x8233D888
+name = "LoMouseSupportDirectRows236AllHook"
+registers = ["r3"]
+
+[[midasm_hook]]
+address = 0x8233DA60
+name = "LoMouseSupportStandardRows204Hook"
+registers = ["r3"]
+
+[[midasm_hook]]
+address = 0x8233DEC0
+name = "LoMouseSupportStandardRows204Hook"
+registers = ["r3"]
+
+[[midasm_hook]]
+address = 0x8233E248
+name = "LoMouseSupportStandardRows204Hook"
+registers = ["r3"]
+
+[[midasm_hook]]
+address = 0x8233E600
+name = "LoMouseSupportStandardRows204Hook"
+registers = ["r3"]
+
+[[midasm_hook]]
+address = 0x8233E950
+name = "LoMouseSupportStandardRows204Hook"
+registers = ["r3"]
+
+[[midasm_hook]]
+address = 0x8233EE00
+name = "LoMouseSupportStandardRows204Hook"
+registers = ["r3"]
+
+[[midasm_hook]]
+address = 0x828EBB40
+name = "LoMouseSupportStandardRows204Hook"
+registers = ["r3"]
+
+[[midasm_hook]]
+address = 0x82329AC0
+name = "LoMouseSupportControlStateDebugHook"
+registers = ["r3", "r4", "r5"]
+
+[[midasm_hook]]
+address = 0x8232ACA0
+name = "LoMouseSupportUiActionConsumeHook"
+registers = ["r3", "r4"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x8232B1A0
+name = "LoMouseSupportUiActionIsPressedHook"
+registers = ["r3", "r4"]
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x82871E18
+name = "LoMouseSupportUiActionIsActiveHook"
+registers = ["r3", "r4"]
+return_on_true = true

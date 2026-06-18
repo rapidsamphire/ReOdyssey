@@ -1,0 +1,20 @@
+[submodule "thirdparty/plume"]
+	path = thirdparty/plume
+	url = https://github.com/renderbag/plume.git
+	branch = main
+[submodule "thirdparty/smol-v"]
+	path = thirdparty/smol-v
+	url = https://github.com/aras-p/smol-v.git
+	branch = main
+[submodule "thirdparty/unordered_dense"]
+	path = thirdparty/unordered_dense
+	url = https://github.com/martinus/unordered_dense.git
+	branch = main
+[submodule "thirdparty/zstd"]
+	path = thirdparty/zstd
+	url = https://github.com/facebook/zstd.git
+	branch = dev
+[submodule "thirdparty/XenosRecomp"]
+	path = thirdparty/XenosRecomp
+	url = https://github.com/rapidsamphire/XenosRecomp.git
+	branch = main
