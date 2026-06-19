@@ -547,6 +547,9 @@ XenosTextureInfo ParseTextureFetchConstant(const rex::be<uint32_t> *fc) {
   info.pitchTexels = ((fc0 >> 22) & 0x1FF) * 32;
   info.tiled = (fc0 >> 31) != 0;
   const uint32_t gpuFormat = fc1 & 0x3F;
+  // SignX (bits 2-3 of fetch constant word 0); GPUSIGN_GAMMA == 3 means the
+  // colour channels are sRGB and must be linearised on sample.
+  const bool gamma = ((fc0 >> 2) & 0x3) == 3;
   info.endian = (fc1 >> 6) & 0x3;
   info.baseAddress = ((fc1 >> 12) & 0xFFFFF) << 12;
   info.width = (fc2 & 0x1FFF) + 1;
@@ -563,17 +566,17 @@ XenosTextureInfo ParseTextureFetchConstant(const rex::be<uint32_t> *fc) {
     info.bytesPerBlock = 4;
     break;
   case 18: // k_DXT1
-    info.format = RenderFormat::BC1_UNORM;
+    info.format = gamma ? RenderFormat::BC1_UNORM_SRGB : RenderFormat::BC1_UNORM;
     info.blockDim = 4;
     info.bytesPerBlock = 8;
     break;
   case 19: // k_DXT2_3
-    info.format = RenderFormat::BC2_UNORM;
+    info.format = gamma ? RenderFormat::BC2_UNORM_SRGB : RenderFormat::BC2_UNORM;
     info.blockDim = 4;
     info.bytesPerBlock = 16;
     break;
   case 20: // k_DXT4_5
-    info.format = RenderFormat::BC3_UNORM;
+    info.format = gamma ? RenderFormat::BC3_UNORM_SRGB : RenderFormat::BC3_UNORM;
     info.blockDim = 4;
     info.bytesPerBlock = 16;
     break;
