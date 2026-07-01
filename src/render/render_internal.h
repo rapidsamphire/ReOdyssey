@@ -34,6 +34,8 @@ plume::RenderPipelineLayout *PipelineLayout();
 
 plume::RenderPipeline *GetBlitPipeline(plume::RenderFormat format);
 
+uint32_t CurrentFrameSlot();
+
 uint32_t AllocTextureDescriptor();
 void FreeTextureDescriptor(uint32_t index);
 

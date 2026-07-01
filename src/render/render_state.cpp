@@ -387,7 +387,12 @@ struct UploadAllocator {
   }
 };
 
-UploadAllocator g_uploadAllocator;
+inline constexpr uint32_t kUploadFrameCount = 2;
+std::array<UploadAllocator, kUploadFrameCount> g_uploadAllocators;
+
+UploadAllocator &CurrentUploadAllocator() {
+  return g_uploadAllocators[CurrentFrameSlot() % kUploadFrameCount];
+}
 
 RootConstantUploadCache<std::array<uint32_t, 0x400>>
     g_vertexFloatConstantCache;
@@ -397,7 +402,7 @@ RootConstantUploadCache<SharedConstants> g_sharedConstantCache;
 
 UploadResult UploadGuestVertexData(const void *data, uint32_t size,
                                    uint64_t alignment) {
-  UploadResult result = g_uploadAllocator.allocate(size, alignment);
+  UploadResult result = CurrentUploadAllocator().allocate(size, alignment);
   const uint8_t *srcBytes = reinterpret_cast<const uint8_t *>(data);
   uint8_t *dstBytes = result.memory;
 
@@ -476,7 +481,7 @@ void FlushGuestFloatConstants(const uint32_t *constants,
   }
 
   UploadResult allocation =
-      g_uploadAllocator.allocateCopy<true>(constants, byteCount, 0x100);
+      CurrentUploadAllocator().allocateCopy<true>(constants, byteCount, 0x100);
   std::memcpy(cache.data.data(), constants, byteCount);
   cache.ref = allocation.buffer->at(allocation.offset);
   cache.valid = true;
@@ -490,7 +495,7 @@ void FlushSharedConstants() {
     return;
   }
 
-  UploadResult allocation = g_uploadAllocator.allocateCopy<false>(
+  UploadResult allocation = CurrentUploadAllocator().allocateCopy<false>(
       &g_sharedConstants, sizeof(g_sharedConstants), 0x100);
   std::memcpy(&g_sharedConstantCache.data, &g_sharedConstants,
               sizeof(g_sharedConstants));
@@ -1719,7 +1724,7 @@ template <uint32_t PrimitiveType> struct PrimitiveIndexData {
       }
     }
 
-    UploadResult allocation = g_uploadAllocator.allocateCopy<false>(
+    UploadResult allocation = CurrentUploadAllocator().allocateCopy<false>(
         indexData.data(), indexCount * 2, 2);
     g_indexBufferView.buffer = allocation.buffer->at(allocation.offset);
     g_indexBufferView.size = indexCount * 2;
@@ -2372,7 +2377,7 @@ void FlushPendingResolvesForPresent() {
 }
 
 void BeginRenderStateFrame() {
-  g_uploadAllocator.reset();
+  CurrentUploadAllocator().reset();
   g_vertexFloatConstantCache.valid = false;
   g_pixelFloatConstantCache.valid = false;
   g_sharedConstantCache.valid = false;
@@ -2711,10 +2716,10 @@ void SetIndicesGuestData(GuestDevice * /*device*/, const void *data,
   if (entry.frame != g_frameIndex || entry.size != size) {
     UploadResult result;
     if (indexStride == 4) {
-      result = g_uploadAllocator.allocateCopy<true>(
+      result = CurrentUploadAllocator().allocateCopy<true>(
           reinterpret_cast<const uint32_t *>(data), size & ~3u, 4);
     } else {
-      result = g_uploadAllocator.allocateCopy<true>(
+      result = CurrentUploadAllocator().allocateCopy<true>(
           reinterpret_cast<const uint16_t *>(data), size & ~1u, 2);
     }
     entry.frame = g_frameIndex;
@@ -3186,11 +3191,11 @@ void DrawIndexedPrimitiveUP(GuestDevice *device, uint32_t primitiveType,
   uint32_t indexCount = IndexCountForPrimitive(primitiveType, numPrimitives);
   UploadResult ia;
   if (indexStride == 4) {
-    ia = g_uploadAllocator.allocateCopy<true>(
+    ia = CurrentUploadAllocator().allocateCopy<true>(
         reinterpret_cast<const uint32_t *>(indexData), indexCount * 4, 4);
     g_indexBufferView.format = RenderFormat::R32_UINT;
   } else {
-    ia = g_uploadAllocator.allocateCopy<true>(
+    ia = CurrentUploadAllocator().allocateCopy<true>(
         reinterpret_cast<const uint16_t *>(indexData), indexCount * 2, 2);
     g_indexBufferView.format = RenderFormat::R16_UINT;
   }

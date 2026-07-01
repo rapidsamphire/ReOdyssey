@@ -40,11 +40,20 @@ constexpr RenderFormat kBackbufferFormat = RenderFormat::R8G8B8A8_UNORM;
 std::unique_ptr<RenderInterface> g_interface;
 std::unique_ptr<RenderDevice> g_device;
 std::unique_ptr<RenderCommandQueue> g_queue;
-std::unique_ptr<RenderCommandList> g_commandList;
-std::unique_ptr<RenderCommandFence> g_commandFence;
-std::unique_ptr<RenderCommandSemaphore> g_acquireSemaphore;
-std::unique_ptr<RenderCommandSemaphore> g_renderSemaphore;
 std::unique_ptr<RenderSwapChain> g_swapChain;
+
+constexpr uint32_t kFramesInFlight = 2;
+
+struct FrameContext {
+  std::unique_ptr<RenderCommandList> commandList;
+  std::unique_ptr<RenderCommandFence> commandFence;
+  std::unique_ptr<RenderCommandSemaphore> acquireSemaphore;
+  std::unique_ptr<RenderCommandSemaphore> renderSemaphore;
+  bool commandsInFlight = false;
+};
+
+std::array<FrameContext, kFramesInFlight> g_frames;
+uint32_t g_frameSlot = 0;
 
 // One framebuffer per swapchain backbuffer, keyed by texture index.
 std::vector<std::unique_ptr<RenderFramebuffer>> g_framebuffers;
@@ -59,6 +68,11 @@ std::unique_ptr<RenderDescriptorSet> g_textureDescriptorSet;
 std::mutex g_descriptorMutex;
 uint32_t g_descriptorCapacity = reodyssey::render::kNullTextureDescriptorCount;
 std::vector<uint32_t> g_freedDescriptors;
+struct PendingDescriptorFree {
+  uint32_t index;
+  uint32_t frameMask;
+};
+std::vector<PendingDescriptorFree> g_pendingDescriptorFrees;
 std::array<std::unique_ptr<RenderTexture>,
            reodyssey::render::kNullTextureDescriptorCount>
     g_nullTextures;
@@ -78,10 +92,6 @@ std::unordered_map<uint32_t, std::unique_ptr<RenderPipeline>> g_blitPipelines;
 bool g_initialized = false;
 bool g_swapChainValid = false;
 bool g_frameOpen = false;
-// Whether g_commandFence has a pending, unconsumed signal. The D3D12 fence
-// event is auto-reset: one executeCommandLists signal pairs with exactly one
-// waitForCommandFence. Waiting without a pending signal blocks forever.
-bool g_commandsInFlight = false;
 uint32_t g_backBufferIndex = 0;
 RenderWindow g_window{};
 
@@ -96,6 +106,31 @@ void RebuildFramebuffers() {
     const RenderTexture *color = g_swapChain->getTexture(i);
     RenderFramebufferDesc desc(&color, 1);
     g_framebuffers[i] = g_device->createFramebuffer(desc);
+  }
+}
+
+FrameContext &CurrentFrame() { return g_frames[g_frameSlot]; }
+
+void WaitForFrame(FrameContext &frame) {
+  if (!frame.commandsInFlight)
+    return;
+  g_queue->waitForCommandFence(frame.commandFence.get());
+  frame.commandsInFlight = false;
+}
+
+void RetireFrame(uint32_t frameSlot) {
+  std::lock_guard lock(g_descriptorMutex);
+  const uint32_t frameBit = 1u << frameSlot;
+  for (size_t i = 0; i < g_pendingDescriptorFrees.size();) {
+    PendingDescriptorFree &pending = g_pendingDescriptorFrees[i];
+    pending.frameMask &= ~frameBit;
+    if (pending.frameMask == 0) {
+      g_freedDescriptors.push_back(pending.index);
+      pending = g_pendingDescriptorFrees.back();
+      g_pendingDescriptorFrees.pop_back();
+    } else {
+      ++i;
+    }
   }
 }
 
@@ -134,10 +169,13 @@ bool Video::Init(void *nativeWindowHandle, uint32_t width, uint32_t height) {
   }
 
   g_queue = g_device->createCommandQueue(RenderCommandListType::DIRECT);
-  g_commandList = g_queue->createCommandList();
-  g_commandFence = g_device->createCommandFence();
-  g_acquireSemaphore = g_device->createCommandSemaphore();
-  g_renderSemaphore = g_device->createCommandSemaphore();
+  for (FrameContext &frame : g_frames) {
+    frame.commandList = g_queue->createCommandList();
+    frame.commandFence = g_device->createCommandFence();
+    frame.acquireSemaphore = g_device->createCommandSemaphore();
+    frame.renderSemaphore = g_device->createCommandSemaphore();
+    frame.commandsInFlight = false;
+  }
 
   RenderSwapChainDesc swapChainDesc(g_window, kBackbufferFormat, 2);
   g_swapChain = g_queue->createSwapChain(swapChainDesc);
@@ -247,6 +285,8 @@ namespace reodyssey::render {
 RenderInterface *Interface() { return g_interface.get(); }
 RenderDevice *Device() { return g_device.get(); }
 
+uint32_t CurrentFrameSlot() { return g_frameSlot; }
+
 void SetPresentSource(GuestBaseTexture *frontBuffer) {
   g_presentSource = frontBuffer;
 }
@@ -256,20 +296,22 @@ void EnsureFrameStarted() {
     return;
 
   if (!g_swapChainValid || g_swapChain->needsResize()) {
-    // Drain the GPU (and any pending presentation) before resizing. Must not
-    // wait on g_commandFence directly: Present() already consumed its signal.
+    // Drain the GPU (and any pending presentation) before resizing.
     Video::WaitForGPU();
     g_swapChainValid = g_swapChain->resize();
     if (!g_swapChainValid)
       return;
     RebuildFramebuffers();
   }
-  if (!g_swapChain->acquireTexture(g_acquireSemaphore.get(),
+  FrameContext &frame = CurrentFrame();
+  WaitForFrame(frame);
+  RetireFrame(g_frameSlot);
+  if (!g_swapChain->acquireTexture(frame.acquireSemaphore.get(),
                                    &g_backBufferIndex)) {
     g_swapChainValid = false;
     return;
   }
-  g_commandList->begin();
+  frame.commandList->begin();
   g_frameOpen =
       true; // set before BeginRenderStateFrame (it calls CommandList())
   BeginRenderStateFrame();
@@ -277,7 +319,7 @@ void EnsureFrameStarted() {
 
 RenderCommandList *CommandList() {
   EnsureFrameStarted();
-  return g_commandList.get();
+  return CurrentFrame().commandList.get();
 }
 
 RenderDescriptorSet *TextureDescriptorSet() {
@@ -321,7 +363,19 @@ void FreeTextureDescriptor(uint32_t index) {
   if (index < kNullTextureDescriptorCount)
     return;
   std::lock_guard lock(g_descriptorMutex);
-  g_freedDescriptors.push_back(index);
+  uint32_t frameMask = 0;
+  for (uint32_t i = 0; i < kFramesInFlight; ++i) {
+    if (g_frames[i].commandsInFlight)
+      frameMask |= 1u << i;
+  }
+  if (g_frameOpen)
+    frameMask |= 1u << g_frameSlot;
+
+  if (frameMask == 0) {
+    g_freedDescriptors.push_back(index);
+    return;
+  }
+  g_pendingDescriptorFrees.push_back({index, frameMask});
 }
 
 void ExecuteUpload(const std::function<void(RenderCommandList *)> &record) {
@@ -353,7 +407,10 @@ void Video::Present() {
   RenderTexture *backBuffer = g_swapChain->getTexture(g_backBufferIndex);
   RenderFramebuffer *framebuffer = g_framebuffers[g_backBufferIndex].get();
 
-  g_commandList->setFramebuffer(nullptr);
+  FrameContext &frame = CurrentFrame();
+  RenderCommandList *commandList = frame.commandList.get();
+
+  commandList->setFramebuffer(nullptr);
   RenderPipeline *blitPipeline =
       reodyssey::render::GetBlitPipeline(kBackbufferFormat);
   const bool blit = g_presentSource != nullptr &&
@@ -374,70 +431,71 @@ void Video::Present() {
                              RenderTextureLayout::SHADER_READ),
         RenderTextureBarrier(backBuffer, RenderTextureLayout::COLOR_WRITE),
     };
-    g_commandList->barriers(RenderBarrierStage::GRAPHICS, toBlit, 2);
+    commandList->barriers(RenderBarrierStage::GRAPHICS, toBlit, 2);
     g_presentSource->layout = RenderTextureLayout::SHADER_READ;
 
     const uint32_t descriptorIndex = g_presentSource->descriptorIndex;
-    g_commandList->setGraphicsPipelineLayout(g_pipelineLayout.get());
-    g_commandList->setPipeline(blitPipeline);
-    g_commandList->setGraphicsDescriptorSet(g_textureDescriptorSet.get(), 0);
-    g_commandList->setGraphicsDescriptorSet(g_samplerDescriptorSet.get(), 3);
-    g_commandList->setGraphicsPushConstants(0, &descriptorIndex, 0,
-                                            sizeof(descriptorIndex));
-    g_commandList->setFramebuffer(framebuffer);
-    g_commandList->setViewports(
+    commandList->setGraphicsPipelineLayout(g_pipelineLayout.get());
+    commandList->setPipeline(blitPipeline);
+    commandList->setGraphicsDescriptorSet(g_textureDescriptorSet.get(), 0);
+    commandList->setGraphicsDescriptorSet(g_samplerDescriptorSet.get(), 3);
+    commandList->setGraphicsPushConstants(0, &descriptorIndex, 0,
+                                          sizeof(descriptorIndex));
+    commandList->setFramebuffer(framebuffer);
+    commandList->setViewports(
         RenderViewport(0.0f, 0.0f, float(g_swapChain->getWidth()),
                        float(g_swapChain->getHeight())));
-    g_commandList->setScissors(
+    commandList->setScissors(
         RenderRect(0, 0, g_swapChain->getWidth(), g_swapChain->getHeight()));
-    g_commandList->drawInstanced(3, 1, 0, 0);
-    g_commandList->barriers(
+    commandList->drawInstanced(3, 1, 0, 0);
+    commandList->barriers(
         RenderBarrierStage::GRAPHICS,
         RenderTextureBarrier(backBuffer, RenderTextureLayout::PRESENT));
   } else {
     // No usable front buffer: clear so we still present.
-    g_commandList->barriers(
+    commandList->barriers(
         RenderBarrierStage::GRAPHICS,
         RenderTextureBarrier(backBuffer, RenderTextureLayout::COLOR_WRITE));
-    g_commandList->setFramebuffer(framebuffer);
-    g_commandList->clearColor(0, RenderColor(0.10f, 0.20f, 0.40f, 1.0f));
-    g_commandList->barriers(
+    commandList->setFramebuffer(framebuffer);
+    commandList->clearColor(0, RenderColor(0.10f, 0.20f, 0.40f, 1.0f));
+    commandList->barriers(
         RenderBarrierStage::GRAPHICS,
         RenderTextureBarrier(backBuffer, RenderTextureLayout::PRESENT));
   }
-  g_commandList->end();
+  commandList->end();
   g_frameOpen = false;
   g_presentSource = nullptr;
 
-  RenderCommandSemaphore *waitSemaphores[] = {g_acquireSemaphore.get()};
-  RenderCommandSemaphore *signalSemaphores[] = {g_renderSemaphore.get()};
-  const RenderCommandList *commandLists[] = {g_commandList.get()};
+  RenderCommandSemaphore *waitSemaphores[] = {frame.acquireSemaphore.get()};
+  RenderCommandSemaphore *signalSemaphores[] = {frame.renderSemaphore.get()};
+  const RenderCommandList *commandLists[] = {commandList};
   g_queue->executeCommandLists(commandLists, 1, waitSemaphores, 1,
-                               signalSemaphores, 1, g_commandFence.get());
-  g_commandsInFlight = true;
+                               signalSemaphores, 1,
+                               frame.commandFence.get());
+  frame.commandsInFlight = true;
 
   g_swapChainValid =
       g_swapChain->present(g_backBufferIndex, signalSemaphores, 1);
-
-  // Fully serialized for now; frame-in-flight pipelining comes later.
-  g_queue->waitForCommandFence(g_commandFence.get());
-  g_commandsInFlight = false;
+  g_frameSlot = (g_frameSlot + 1) % kFramesInFlight;
 }
 
 void Video::WaitForGPU() {
   if (!g_initialized) {
     return;
   }
-  if (g_commandsInFlight) {
-    g_queue->waitForCommandFence(g_commandFence.get());
-    g_commandsInFlight = false;
-  }
+  for (FrameContext &frame : g_frames)
+    WaitForFrame(frame);
+  for (uint32_t i = 0; i < kFramesInFlight; ++i)
+    RetireFrame(i);
 
   assert(!g_frameOpen);
-  g_commandList->begin();
-  g_commandList->end();
-  g_queue->executeCommandLists(g_commandList.get(), g_commandFence.get());
-  g_queue->waitForCommandFence(g_commandFence.get());
+  FrameContext &frame = CurrentFrame();
+  frame.commandList->begin();
+  frame.commandList->end();
+  g_queue->executeCommandLists(frame.commandList.get(),
+                               frame.commandFence.get());
+  frame.commandsInFlight = true;
+  WaitForFrame(frame);
 }
 
 void Video::Shutdown() {
@@ -457,10 +515,13 @@ void Video::Shutdown() {
   g_copyQueue.reset();
   g_framebuffers.clear();
   g_swapChain.reset();
-  g_renderSemaphore.reset();
-  g_acquireSemaphore.reset();
-  g_commandFence.reset();
-  g_commandList.reset();
+  for (FrameContext &frame : g_frames) {
+    frame.renderSemaphore.reset();
+    frame.acquireSemaphore.reset();
+    frame.commandFence.reset();
+    frame.commandList.reset();
+    frame.commandsInFlight = false;
+  }
   g_queue.reset();
   g_device.reset();
   g_interface.reset();
