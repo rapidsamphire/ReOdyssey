@@ -137,6 +137,7 @@ struct GuestVertexDeclaration : GuestResource {
   uint32_t indexVertexStream = 0;
   bool hasR11G11B10Normal = false;
   bool hasUByte4TangentBasis = false;
+  bool usesDummyVertexStream = false;
   bool vertexStreams[16]{};
 
   GuestVertexDeclaration() : GuestResource(ResourceType::VertexDeclaration) {}

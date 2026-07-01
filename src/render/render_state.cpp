@@ -135,6 +135,7 @@ RenderVertexBufferView g_vertexBufferViews[16];
 RenderInputSlot g_inputSlots[16];
 RenderIndexBufferView g_indexBufferView({}, 0, RenderFormat::R16_UINT);
 DirtyStates g_dirtyStates(true);
+std::unique_ptr<RenderBuffer> g_dummyVertexBuffer;
 // Set by FlushRenderState: whether a valid graphics pipeline is bound. Draws
 // skip when false (e.g. a guest shader missing from the translated cache).
 bool g_pipelineBound = false;
@@ -741,6 +742,51 @@ UploadResult UploadGuestVertexData(const void *data, uint32_t size,
                 size - swappedSize);
   }
   return result;
+}
+
+void MarkVertexStreamDirty(uint8_t index) {
+  g_dirtyStates.vertexStreamFirst =
+      std::min<uint8_t>(g_dirtyStates.vertexStreamFirst, index);
+  g_dirtyStates.vertexStreamLast =
+      std::max<uint8_t>(g_dirtyStates.vertexStreamLast, index);
+}
+
+void EnsureInputSlotIndices() {
+  for (uint32_t i = 0; i < std::size(g_inputSlots); ++i)
+    g_inputSlots[i].index = i;
+}
+
+void EnsureDummyVertexStream() {
+  constexpr uint8_t kDummyStream = 15;
+  constexpr uint32_t kDefaultVertexInput = 0;
+
+  if (g_pipelineState.vertexDeclaration == nullptr ||
+      !g_pipelineState.vertexDeclaration->usesDummyVertexStream) {
+    return;
+  }
+
+  if (g_dummyVertexBuffer == nullptr) {
+    g_dummyVertexBuffer = Device()->createBuffer(RenderBufferDesc::UploadBuffer(
+        sizeof(kDefaultVertexInput), RenderBufferFlag::VERTEX));
+    if (g_dummyVertexBuffer != nullptr) {
+      void *mapped = g_dummyVertexBuffer->map();
+      std::memcpy(mapped, &kDefaultVertexInput, sizeof(kDefaultVertexInput));
+      const RenderRange written(0, sizeof(kDefaultVertexInput));
+      g_dummyVertexBuffer->unmap(0, &written);
+    }
+  }
+
+  if (g_dummyVertexBuffer == nullptr)
+    return;
+
+  bool dirty = false;
+  SetDirtyValue(dirty, g_vertexBufferViews[kDummyStream].buffer,
+                g_dummyVertexBuffer->at(0));
+  SetDirtyValue(dirty, g_vertexBufferViews[kDummyStream].size,
+                uint32_t(sizeof(kDefaultVertexInput)));
+  SetDirtyValue(dirty, g_inputSlots[kDummyStream].stride, 0u);
+  if (dirty)
+    MarkVertexStreamDirty(kDummyStream);
 }
 
 void SetRootDescriptor(const UploadResult &allocation, uint32_t index) {
@@ -1482,6 +1528,7 @@ void CompleteVertexDeclaration(GuestVertexDeclaration *decl) {
     decl->vertexStreams[e.stream] = true;
   }
 
+  bool hasDummyElements = false;
   auto addDummyElement = [&](uint32_t usage, uint32_t usageIndex) {
     const uint32_t location = LookupLocation(usage, usageIndex);
     for (const RenderInputElement &ie : inputElements)
@@ -1498,6 +1545,7 @@ void CompleteVertexDeclaration(GuestVertexDeclaration *decl) {
     }
     inputElements.emplace_back(ConvertDeclUsage(usage), usageIndex, location,
                                format, 15, 0);
+    hasDummyElements = true;
   };
   addDummyElement(D3DDECLUSAGE_POSITION, 0);
   addDummyElement(D3DDECLUSAGE_NORMAL, 0);
@@ -1509,6 +1557,9 @@ void CompleteVertexDeclaration(GuestVertexDeclaration *decl) {
   addDummyElement(D3DDECLUSAGE_COLOR, 1);
   addDummyElement(D3DDECLUSAGE_BLENDWEIGHT, 0);
   addDummyElement(D3DDECLUSAGE_BLENDINDICES, 0);
+  decl->usesDummyVertexStream = hasDummyElements;
+  if (hasDummyElements)
+    decl->vertexStreams[15] = true;
 
   decl->inputElementCount = uint32_t(inputElements.size());
   decl->inputElements =
@@ -1855,6 +1906,8 @@ void FlushSamplerStates(GuestDevice *device) {
 }
 
 void FlushRenderState(GuestDevice *device) {
+  EnsureInputSlotIndices();
+  EnsureDummyVertexStream();
 
   GuestBaseTexture *renderTarget =
       g_pipelineState.colorWriteEnable ? g_renderTarget : nullptr;
@@ -2632,6 +2685,7 @@ void FlushPendingResolvesForPresent() {
 void BeginRenderStateFrame() {
   g_uploadAllocator.reset();
   ++g_frameIndex; // invalidates the per-frame guest vertex/index upload caches
+  EnsureInputSlotIndices();
   g_framebuffer = nullptr;
   g_dirtyStates = DirtyStates(true);
   if (!g_sharedConstantsInitialized) {
