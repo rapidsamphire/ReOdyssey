@@ -101,6 +101,14 @@ struct SharedConstants {
   uint32_t conditionalRenderingIndex{};
 };
 
+struct SamplerStateCache {
+  uint32_t data0 = 0;
+  uint32_t data3 = 0;
+  uint32_t data5 = 0;
+  uint32_t descriptorIndex = 0;
+  bool valid = false;
+};
+
 struct DirtyStates {
   bool renderTargetAndDepthStencil;
   bool viewport;
@@ -127,6 +135,8 @@ RenderViewport g_viewport(0.0f, 0.0f, 1280.0f, 720.0f);
 PipelineState g_pipelineState;
 SharedConstants g_sharedConstants;
 GuestTexture *g_textures[16];
+GuestBaseTexture *g_boundTextureResources[16];
+RenderTextureViewDimension g_boundTextureViewDimensions[16];
 bool g_scissorTestEnable = false;
 bool g_sharedConstantsInitialized = false;
 RenderRect g_scissorRect;
@@ -138,6 +148,11 @@ std::unique_ptr<RenderBuffer> g_dummyVertexBuffer;
 // Set by FlushRenderState: whether a valid graphics pipeline is bound. Draws
 // skip when false (e.g. a guest shader missing from the translated cache).
 bool g_pipelineBound = false;
+PipelineState g_cachedPipelineState;
+RenderPipeline *g_cachedPipeline = nullptr;
+RenderPipeline *g_boundPipeline = nullptr;
+bool g_cachedPipelineStateValid = false;
+bool g_pipelineBindingDirty = true;
 
 struct GuestClipPlane {
   rex::be<float> x;
@@ -172,6 +187,7 @@ std::unordered_map<uint64_t, std::unique_ptr<RenderPipeline>> g_pipelines;
 std::unordered_map<uint64_t,
                    std::pair<uint32_t, std::unique_ptr<RenderSampler>>>
     g_samplerStates;
+SamplerStateCache g_samplerStateCaches[16];
 std::unordered_map<GuestShader *, GuestVertexDeclaration *>
     g_vertexShaderDeclarations;
 std::unordered_map<RenderTexture *, std::unique_ptr<RenderFramebuffer>>
@@ -314,6 +330,12 @@ struct UploadResult {
   uint8_t *memory;
 };
 
+template <typename T> struct RootConstantUploadCache {
+  T data{};
+  RenderBufferReference ref;
+  bool valid = false;
+};
+
 struct UploadAllocator {
   static constexpr uint64_t kBufferSize = 16 * 1024 * 1024;
 
@@ -366,6 +388,12 @@ struct UploadAllocator {
 };
 
 UploadAllocator g_uploadAllocator;
+
+RootConstantUploadCache<std::array<uint32_t, 0x400>>
+    g_vertexFloatConstantCache;
+RootConstantUploadCache<std::array<uint32_t, 0x380>>
+    g_pixelFloatConstantCache;
+RootConstantUploadCache<SharedConstants> g_sharedConstantCache;
 
 UploadResult UploadGuestVertexData(const void *data, uint32_t size,
                                    uint64_t alignment) {
@@ -432,9 +460,43 @@ void EnsureDummyVertexStream() {
     MarkVertexStreamDirty(kDummyStream);
 }
 
-void SetRootDescriptor(const UploadResult &allocation, uint32_t index) {
-  CommandList()->setGraphicsRootDescriptor(
-      allocation.buffer->at(allocation.offset), index);
+void SetRootDescriptor(RenderBufferReference ref, uint32_t index) {
+  CommandList()->setGraphicsRootDescriptor(ref, index);
+}
+
+template <size_t DwordCount>
+void FlushGuestFloatConstants(const uint32_t *constants,
+                              RootConstantUploadCache<
+                                  std::array<uint32_t, DwordCount>> &cache,
+                              uint32_t rootIndex) {
+  const size_t byteCount = DwordCount * sizeof(uint32_t);
+  if (cache.valid &&
+      std::memcmp(cache.data.data(), constants, byteCount) == 0) {
+    return;
+  }
+
+  UploadResult allocation =
+      g_uploadAllocator.allocateCopy<true>(constants, byteCount, 0x100);
+  std::memcpy(cache.data.data(), constants, byteCount);
+  cache.ref = allocation.buffer->at(allocation.offset);
+  cache.valid = true;
+  SetRootDescriptor(cache.ref, rootIndex);
+}
+
+void FlushSharedConstants() {
+  if (g_sharedConstantCache.valid &&
+      std::memcmp(&g_sharedConstantCache.data, &g_sharedConstants,
+                  sizeof(g_sharedConstants)) == 0) {
+    return;
+  }
+
+  UploadResult allocation = g_uploadAllocator.allocateCopy<false>(
+      &g_sharedConstants, sizeof(g_sharedConstants), 0x100);
+  std::memcpy(&g_sharedConstantCache.data, &g_sharedConstants,
+              sizeof(g_sharedConstants));
+  g_sharedConstantCache.ref = allocation.buffer->at(allocation.offset);
+  g_sharedConstantCache.valid = true;
+  SetRootDescriptor(g_sharedConstantCache.ref, 2);
 }
 
 // ---------------------------------------------------------------------------
@@ -627,6 +689,7 @@ bool BlitFormatConvertedResolve(RenderCommandList *commandList,
   // The injected draw clobbered the framebuffer/viewport/scissor bindings;
   // force the next guest flush to rebind them.
   g_framebuffer = nullptr;
+  g_pipelineBindingDirty = true;
   g_dirtyStates.renderTargetAndDepthStencil = true;
   g_dirtyStates.viewport = true;
   g_dirtyStates.scissorRect = true;
@@ -1492,6 +1555,11 @@ void FlushSamplerStates(GuestDevice *device) {
     uint32_t data0 = s.data[0].get();
     uint32_t data3 = s.data[3].get();
     uint32_t data5 = s.data[5].get();
+    SamplerStateCache &cache = g_samplerStateCaches[i];
+    if (cache.valid && cache.data0 == data0 && cache.data3 == data3 &&
+        cache.data5 == data5) {
+      continue;
+    }
 
     RenderSamplerDesc desc{};
     desc.addressU = ConvertAddressMode((data0 >> 10) & 0x7);
@@ -1511,7 +1579,12 @@ void FlushSamplerStates(GuestDevice *device) {
       sampler = Device()->createSampler(desc);
       SamplerDescriptorSet()->setSampler(descriptorIndex - 1, sampler.get());
     }
-    g_sharedConstants.samplerIndices[i] = descriptorIndex - 1;
+    cache.data0 = data0;
+    cache.data3 = data3;
+    cache.data5 = data5;
+    cache.descriptorIndex = descriptorIndex - 1;
+    cache.valid = true;
+    g_sharedConstants.samplerIndices[i] = cache.descriptorIndex;
   }
 }
 
@@ -1554,9 +1627,23 @@ void FlushRenderState(GuestDevice *device) {
     pipelineState.stencilEnable = false;
     pipelineState.depthStencilFormat = RenderFormat::UNKNOWN;
   }
-  RenderPipeline *pipeline = GetPipeline(pipelineState);
-  if (pipeline != nullptr)
+  RenderPipeline *pipeline = nullptr;
+  if (g_cachedPipelineStateValid &&
+      std::memcmp(&g_cachedPipelineState, &pipelineState,
+                  sizeof(pipelineState)) == 0) {
+    pipeline = g_cachedPipeline;
+  } else {
+    pipeline = GetPipeline(pipelineState);
+    g_cachedPipelineState = pipelineState;
+    g_cachedPipeline = pipeline;
+    g_cachedPipelineStateValid = true;
+  }
+  if (pipeline != nullptr &&
+      (g_pipelineBindingDirty || g_boundPipeline != pipeline)) {
     commandList->setPipeline(pipeline);
+    g_boundPipeline = pipeline;
+    g_pipelineBindingDirty = false;
+  }
   g_pipelineBound = (pipeline != nullptr);
 
   // Booleans and sampler indices feed the shared constants (16 bits each in
@@ -1566,19 +1653,11 @@ void FlushRenderState(GuestDevice *device) {
       ((device->pixelShaderBoolConstants[0].get() & 0xFFFF) << 16);
   FlushSamplerStates(device);
 
-  // Constants are byte-swapped out of guest memory each draw (no dirty-range
-  // tracking; the guest writes them directly to device memory).
-  SetRootDescriptor(g_uploadAllocator.allocateCopy<true>(
-                        device->vertexShaderFloatConstants,
-                        sizeof(device->vertexShaderFloatConstants), 0x100),
-                    0);
-  SetRootDescriptor(
-      g_uploadAllocator.allocateCopy<true>(device->pixelShaderFloatConstants,
-                                           0x380 * sizeof(uint32_t), 0x100),
-      1);
-  SetRootDescriptor(g_uploadAllocator.allocateCopy<false>(
-                        &g_sharedConstants, sizeof(g_sharedConstants), 0x100),
-                    2);
+  FlushGuestFloatConstants(device->vertexShaderFloatConstants,
+                           g_vertexFloatConstantCache, 0);
+  FlushGuestFloatConstants(device->pixelShaderFloatConstants,
+                           g_pixelFloatConstantCache, 1);
+  FlushSharedConstants();
 
   if (g_dirtyStates.vertexStreamFirst <= g_dirtyStates.vertexStreamLast) {
     commandList->setVertexBuffers(
@@ -2294,6 +2373,11 @@ void FlushPendingResolvesForPresent() {
 
 void BeginRenderStateFrame() {
   g_uploadAllocator.reset();
+  g_vertexFloatConstantCache.valid = false;
+  g_pixelFloatConstantCache.valid = false;
+  g_sharedConstantCache.valid = false;
+  g_boundPipeline = nullptr;
+  g_pipelineBindingDirty = true;
   ++g_frameIndex; // invalidates the per-frame guest vertex/index upload caches
   EnsureInputSlotIndices();
   g_framebuffer = nullptr;
@@ -2468,11 +2552,13 @@ void SetViewportEnable(GuestDevice * /*device*/, uint32_t value) {
 void EnsureShaderResourceDescriptor(GuestBaseTexture *texture) {
   if (texture == nullptr || texture->texture == nullptr)
     return;
-  if (texture->descriptorIndex == 0)
+  if (texture->descriptorIndex == 0) {
     texture->descriptorIndex = AllocTextureDescriptor();
-  TextureDescriptorSet()->setTexture(texture->descriptorIndex, texture->texture,
-                                     RenderTextureLayout::SHADER_READ,
-                                     texture->textureView.get());
+    TextureDescriptorSet()->setTexture(texture->descriptorIndex,
+                                       texture->texture,
+                                       RenderTextureLayout::SHADER_READ,
+                                       texture->textureView.get());
+  }
 }
 
 void BindTextureDescriptor(uint32_t index, GuestBaseTexture *texture,
@@ -2492,6 +2578,8 @@ void BindTextureDescriptor(uint32_t index, GuestBaseTexture *texture,
       (texture && viewDimension == RenderTextureViewDimension::TEXTURE_CUBE)
           ? texture->descriptorIndex
           : kNullTextureCubeDescriptor;
+  g_boundTextureResources[index] = texture;
+  g_boundTextureViewDimensions[index] = viewDimension;
 }
 
 void SetTexture(GuestDevice * /*device*/, uint32_t index,
@@ -2506,6 +2594,15 @@ void SetTexture(GuestDevice * /*device*/, uint32_t index,
     viewDimension = RenderTextureViewDimension::TEXTURE_2D;
   } else if (texture != nullptr && texture->pendingResolveCount != 0) {
     FlushPendingStretchRects(nullptr, nullptr);
+  }
+
+  if (g_textures[index] == texture &&
+      g_boundTextureResources[index] == boundTexture &&
+      g_boundTextureViewDimensions[index] == viewDimension &&
+      (boundTexture == nullptr ||
+       (!boundTexture->requiresHostInitialization &&
+        boundTexture->layout == RenderTextureLayout::SHADER_READ))) {
+    return;
   }
 
   BindTextureDescriptor(index, boundTexture, viewDimension);
