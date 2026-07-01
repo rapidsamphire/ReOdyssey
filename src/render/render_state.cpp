@@ -12,7 +12,6 @@
 
 #include <plume_render_interface.h>
 #include <rex/hash.h> // XXH3_64bits
-#include <rex/logging.h>
 
 #include "render/guest_device.h"
 #include "render/guest_heap.h"
@@ -178,7 +177,6 @@ std::unordered_map<GuestShader *, GuestVertexDeclaration *>
 std::unordered_map<RenderTexture *, std::unique_ptr<RenderFramebuffer>>
     g_colorFramebuffers;
 std::unordered_set<GuestBaseTexture *> g_pendingStretchRectSurfaces;
-std::unordered_set<uint64_t> g_loggedStretchRectFormatMismatches;
 std::unique_ptr<GuestVertexDeclaration> g_texturedQuadDeclaration;
 std::unique_ptr<GuestVertexDeclaration> g_simpleElementDeclaration;
 std::unique_ptr<GuestVertexDeclaration> g_materialVertexDeclaration;
@@ -213,48 +211,12 @@ bool IsSimpleElementVertexStride(uint32_t vertexStride) {
   return vertexStride == 44 || vertexStride == 48;
 }
 
-const char *PipelineRejectReasonName(PipelineRejectReason reason) {
-  switch (reason) {
-  case PipelineRejectReason::None:
-    return "none";
-  case PipelineRejectReason::NoAttachments:
-    return "no attachments";
-  case PipelineRejectReason::MissingVertexShader:
-    return "missing vertex shader";
-  case PipelineRejectReason::MissingVertexShaderCache:
-    return "missing vertex shader cache entry";
-  case PipelineRejectReason::MissingHostVertexShader:
-    return "failed to create/load host vertex shader";
-  case PipelineRejectReason::MissingVertexDeclaration:
-    return "missing vertex declaration";
-  case PipelineRejectReason::CreateFailed:
-    return "createGraphicsPipeline failed";
-  }
-  return "unknown";
-}
-
-void LogDrawSkip(const char *drawName, uint32_t primitiveType, uint32_t count) {
-  static uint32_t s_logs = 0;
-  if (s_logs++ >= 32)
-    return;
-
-  REXGPU_WARN("{} skipped: reason={} prim={} count={} vs={} vsHash=0x{:016X} "
-              "ps={} psHash=0x{:016X} "
-              "decl={} rt={} ds={} colorWrite=0x{:X} zEnable={}",
-              drawName, PipelineRejectReasonName(g_lastPipelineRejectReason),
-              primitiveType, count, (const void *)g_pipelineState.vertexShader,
-              g_pipelineState.vertexShader &&
-                      g_pipelineState.vertexShader->shaderCacheEntry
-                  ? g_pipelineState.vertexShader->shaderCacheEntry->hash
-                  : 0,
-              (const void *)g_pipelineState.pixelShader,
-              g_pipelineState.pixelShader &&
-                      g_pipelineState.pixelShader->shaderCacheEntry
-                  ? g_pipelineState.pixelShader->shaderCacheEntry->hash
-                  : 0,
-              (const void *)g_pipelineState.vertexDeclaration,
-              (const void *)g_renderTarget, (const void *)g_depthStencil,
-              g_pipelineState.colorWriteEnable, g_pipelineState.zEnable);
+uint32_t ReadGuestDeviceU32(GuestDevice *device, size_t offset) {
+  if (device == nullptr)
+    return 0;
+  return reinterpret_cast<const rex::be<uint32_t> *>(
+             reinterpret_cast<const uint8_t *>(device) + offset)
+      ->get();
 }
 
 const char *KnownDeclarationName(GuestVertexDeclaration *declaration) {
@@ -301,40 +263,6 @@ const char *KnownDeclarationName(GuestVertexDeclaration *declaration) {
   return "Guest";
 }
 
-uint64_t ShaderHash(GuestShader *shader) {
-  return shader && shader->shaderCacheEntry ? shader->shaderCacheEntry->hash
-                                            : 0;
-}
-
-float ReadBigEndianFloat(const uint8_t *data) {
-  uint32_t bits;
-  std::memcpy(&bits, data, sizeof(bits));
-  bits = std::byteswap(bits);
-  return std::bit_cast<float>(bits);
-}
-
-float ReadDeviceFloatConstant(GuestDevice *device, uint32_t index) {
-  if (device == nullptr || index >= std::size(device->vertexShaderFloatConstants))
-    return 0.0f;
-  const auto *data = reinterpret_cast<const uint8_t *>(
-      device->vertexShaderFloatConstants + index);
-  return ReadBigEndianFloat(data);
-}
-
-uint32_t ReadGuestDeviceU32(GuestDevice *device, size_t offset) {
-  if (device == nullptr)
-    return 0;
-  return reinterpret_cast<const rex::be<uint32_t> *>(
-             reinterpret_cast<const uint8_t *>(device) + offset)
-      ->get();
-}
-
-uint8_t ReadGuestDeviceU8(GuestDevice *device, size_t offset) {
-  if (device == nullptr)
-    return 0;
-  return *(reinterpret_cast<const uint8_t *>(device) + offset);
-}
-
 template <typename T> void SetDirtyValue(bool &dirty, T &dest, const T &src);
 
 bool IsShadowIndexedUPDraw(uint32_t primitiveType, uint32_t minVertexIndex,
@@ -366,291 +294,6 @@ void SyncShadowIndexedUPColorWrite(GuestDevice *device, uint32_t primitiveType,
   if (dirty) {
     g_dirtyStates.pipelineState = true;
     g_dirtyStates.renderTargetAndDepthStencil = true;
-  }
-}
-
-void LogShadowIndexedUPDraw(uint32_t primitiveType, uint32_t minVertexIndex,
-                            uint32_t numVertices, uint32_t numPrimitives,
-                            uint32_t indexStride, const void *vertexData,
-                            uint32_t vertexStride,
-                            GuestVertexDeclaration *guestDeclaration,
-                            GuestDevice *device, bool pipelineBound) {
-  if (!IsShadowIndexedUPDraw(primitiveType, minVertexIndex, numVertices,
-                             numPrimitives, indexStride, vertexData,
-                             vertexStride)) {
-    return;
-  }
-
-  static uint32_t s_logs = 0;
-  if (s_logs++ >= 64)
-    return;
-
-  float v[8][3]{};
-  const uint8_t *src = reinterpret_cast<const uint8_t *>(vertexData);
-  for (uint32_t i = 0; i < 8; ++i) {
-    const uint8_t *vertex = src + i * vertexStride;
-    v[i][0] = ReadBigEndianFloat(vertex + 0);
-    v[i][1] = ReadBigEndianFloat(vertex + 4);
-    v[i][2] = ReadBigEndianFloat(vertex + 8);
-  }
-
-  float c[4][4]{};
-  for (uint32_t row = 0; row < 4; ++row) {
-    for (uint32_t col = 0; col < 4; ++col) {
-      c[row][col] = ReadDeviceFloatConstant(device, row * 4 + col);
-    }
-  }
-
-  float ndcMin[3] = {FLT_MAX, FLT_MAX, FLT_MAX};
-  float ndcMax[3] = {-FLT_MAX, -FLT_MAX, -FLT_MAX};
-  float wMin = FLT_MAX;
-  float wMax = -FLT_MAX;
-  float clipSample[2][4]{};
-  for (uint32_t i = 0; i < 8; ++i) {
-    const float in[4] = {v[i][0], v[i][1], v[i][2], 1.0f};
-    float clip[4]{};
-    for (uint32_t row = 0; row < 4; ++row)
-      for (uint32_t col = 0; col < 4; ++col)
-        clip[col] += in[row] * c[row][col];
-    if (i == 0 || i == 4)
-      std::copy(clip, clip + 4, clipSample[i == 4 ? 1 : 0]);
-    wMin = std::min(wMin, clip[3]);
-    wMax = std::max(wMax, clip[3]);
-    if (clip[3] != 0.0f) {
-      for (uint32_t axis = 0; axis < 3; ++axis) {
-        const float ndc = clip[axis] / clip[3];
-        ndcMin[axis] = std::min(ndcMin[axis], ndc);
-        ndcMax[axis] = std::max(ndcMax[axis], ndc);
-      }
-    }
-  }
-
-  REXGPU_WARN(
-      "ShadowIndexedUP trace: phase={} bound={} vsHash=0x{:016X} "
-      "psHash=0x{:016X} guestDecl={}({}) selectedDecl={}({}) rt={} {}x{} "
-      "rtFmt={} ds={} {}x{} dsFmt={} guestDsFmt=0x{:08X} reverseZ={} "
-      "guest10460=0x{:08X} guest10548=0x{:08X} guest10560=0x{:08X} "
-      "guest10564=0x{:08X} guest10568=0x{:08X} "
-      "guest10562=0x{:02X} guest11852=0x{:08X} "
-      "colorWrite=0x{:X} blend={} cull={} depthClip={} zEnable={} "
-      "zWrite={} zFunc={} "
-      "stencil={} ref={} read=0x{:02X} write=0x{:02X} "
-      "front(func={} fail={} zfail={} pass={}) "
-      "back(func={} fail={} zfail={} pass={}) viewport=({},{} {}x{} z={}..{})",
-      g_pipelineState.pixelShader ? "project" : "mark", pipelineBound,
-      ShaderHash(g_pipelineState.vertexShader),
-      ShaderHash(g_pipelineState.pixelShader), (const void *)guestDeclaration,
-      KnownDeclarationName(guestDeclaration),
-      (const void *)g_pipelineState.vertexDeclaration,
-      KnownDeclarationName(g_pipelineState.vertexDeclaration),
-      (const void *)g_renderTarget, g_renderTarget ? g_renderTarget->width : 0,
-      g_renderTarget ? g_renderTarget->height : 0,
-      g_renderTarget ? int(g_renderTarget->format) : int(RenderFormat::UNKNOWN),
-      (const void *)g_depthStencil, g_depthStencil ? g_depthStencil->width : 0,
-      g_depthStencil ? g_depthStencil->height : 0,
-      g_depthStencil ? int(g_depthStencil->format) : int(RenderFormat::UNKNOWN),
-      g_depthStencil ? g_depthStencil->guestFormat : 0, SceneReverseZ(),
-      ReadGuestDeviceU32(device, 10460), ReadGuestDeviceU32(device, 10548),
-      ReadGuestDeviceU32(device, 10560), ReadGuestDeviceU32(device, 10564),
-      ReadGuestDeviceU32(device, 10568), ReadGuestDeviceU8(device, 10562),
-      ReadGuestDeviceU32(device, 11852), g_pipelineState.colorWriteEnable,
-      g_pipelineState.alphaBlendEnable, int(g_pipelineState.cullMode),
-      g_pipelineState.depthClipEnabled, g_pipelineState.zEnable,
-      g_pipelineState.zWriteEnable, int(g_pipelineState.zFunc),
-      g_pipelineState.stencilEnable,
-      g_pipelineState.stencilRef, g_pipelineState.stencilReadMask,
-      g_pipelineState.stencilWriteMask, int(g_pipelineState.stencilFrontFunc),
-      int(g_pipelineState.stencilFrontFail),
-      int(g_pipelineState.stencilFrontDepthFail),
-      int(g_pipelineState.stencilFrontPass),
-      int(g_pipelineState.stencilBackFunc),
-      int(g_pipelineState.stencilBackFail),
-      int(g_pipelineState.stencilBackDepthFail),
-      int(g_pipelineState.stencilBackPass), g_viewport.x, g_viewport.y,
-      g_viewport.width, g_viewport.height, g_viewport.minDepth,
-      g_viewport.maxDepth);
-  REXGPU_WARN("ShadowIndexedUP vertices: v0=({:.3f},{:.3f},{:.3f}) "
-              "v1=({:.3f},{:.3f},{:.3f}) v2=({:.3f},{:.3f},{:.3f}) "
-              "v3=({:.3f},{:.3f},{:.3f})",
-              v[0][0], v[0][1], v[0][2], v[1][0], v[1][1], v[1][2], v[2][0],
-              v[2][1], v[2][2], v[3][0], v[3][1], v[3][2]);
-  REXGPU_WARN("ShadowIndexedUP vertices: v4=({:.3f},{:.3f},{:.3f}) "
-              "v5=({:.3f},{:.3f},{:.3f}) v6=({:.3f},{:.3f},{:.3f}) "
-              "v7=({:.3f},{:.3f},{:.3f})",
-              v[4][0], v[4][1], v[4][2], v[5][0], v[5][1], v[5][2], v[6][0],
-              v[6][1], v[6][2], v[7][0], v[7][1], v[7][2]);
-  REXGPU_WARN(
-      "ShadowIndexedUP VS c0=({:.6g},{:.6g},{:.6g},{:.6g}) "
-      "c1=({:.6g},{:.6g},{:.6g},{:.6g}) "
-      "c2=({:.6g},{:.6g},{:.6g},{:.6g}) "
-      "c3=({:.6g},{:.6g},{:.6g},{:.6g})",
-      c[0][0], c[0][1], c[0][2], c[0][3], c[1][0], c[1][1], c[1][2],
-      c[1][3], c[2][0], c[2][1], c[2][2], c[2][3], c[3][0], c[3][1],
-      c[3][2], c[3][3]);
-  REXGPU_WARN(
-      "ShadowIndexedUP CPU clip v0=({:.6g},{:.6g},{:.6g},{:.6g}) "
-      "v4=({:.6g},{:.6g},{:.6g},{:.6g}) ndcMin=({:.6g},{:.6g},{:.6g}) "
-      "ndcMax=({:.6g},{:.6g},{:.6g}) w={}..{}",
-      clipSample[0][0], clipSample[0][1], clipSample[0][2],
-      clipSample[0][3], clipSample[1][0], clipSample[1][1],
-      clipSample[1][2], clipSample[1][3], ndcMin[0], ndcMin[1], ndcMin[2],
-      ndcMax[0], ndcMax[1], ndcMax[2], wMin, wMax);
-}
-
-void LogSuspiciousIndexedUPDraw(uint32_t primitiveType, uint32_t minVertexIndex,
-                                uint32_t numVertices, uint32_t numPrimitives,
-                                uint32_t indexStride, uint32_t vertexStride,
-                                GuestVertexDeclaration *guestDeclaration,
-                                GuestVertexDeclaration *selectedDeclaration) {
-  const uint64_t vsHash =
-      g_pipelineState.vertexShader &&
-              g_pipelineState.vertexShader->shaderCacheEntry
-          ? g_pipelineState.vertexShader->shaderCacheEntry->hash
-          : 0;
-  const uint64_t psHash =
-      g_pipelineState.pixelShader &&
-              g_pipelineState.pixelShader->shaderCacheEntry
-          ? g_pipelineState.pixelShader->shaderCacheEntry->hash
-          : 0;
-
-  const bool simpleElementFamily = vsHash == kSimpleElementVertexShaderHash;
-  const bool batchedMesh112Family =
-      primitiveType == D3DPT_TRIANGLELIST && numPrimitives == 112 &&
-      numVertices >= 200 && IsSimpleElementVertexStride(vertexStride);
-  if (!simpleElementFamily && !batchedMesh112Family) {
-    return;
-  }
-
-  static uint32_t s_simpleLogs = 0;
-  static uint32_t s_batchedMesh112Logs = 0;
-  if (simpleElementFamily && !batchedMesh112Family && s_simpleLogs++ >= 4)
-    return;
-  if (batchedMesh112Family && s_batchedMesh112Logs++ >= 16)
-    return;
-
-  REXGPU_WARN("DrawIndexedPrimitiveUP trace: family={} prim={} minVertex={} "
-              "vertices={} "
-              "prims={} indexStride={} vertexStride={} guestDecl={}({}) "
-              "selectedDecl={}({}) vsHash=0x{:016X} psHash=0x{:016X}",
-              batchedMesh112Family ? "BatchedMesh112" : "SimpleElement",
-              primitiveType, minVertexIndex, numVertices, numPrimitives,
-              indexStride, vertexStride, (const void *)guestDeclaration,
-              KnownDeclarationName(guestDeclaration),
-              (const void *)selectedDeclaration,
-              KnownDeclarationName(selectedDeclaration), vsHash, psHash);
-}
-
-void LogSuspiciousIndexedDraw(const char *hookName, uint32_t primitiveType,
-                              int32_t baseVertexIndex, uint32_t startIndex,
-                              uint32_t indexCount,
-                              GuestVertexDeclaration *guestDeclaration,
-                              GuestVertexDeclaration *selectedDeclaration) {
-  if (primitiveType != D3DPT_TRIANGLELIST)
-    return;
-
-  const uint64_t vsHash =
-      g_pipelineState.vertexShader &&
-              g_pipelineState.vertexShader->shaderCacheEntry
-          ? g_pipelineState.vertexShader->shaderCacheEntry->hash
-          : 0;
-  const uint64_t psHash =
-      g_pipelineState.pixelShader &&
-              g_pipelineState.pixelShader->shaderCacheEntry
-          ? g_pipelineState.pixelShader->shaderCacheEntry->hash
-          : 0;
-
-  struct DeclarationFacts {
-    bool texcoord12 = false;
-    bool texcoord24 = false;
-    bool blendIndices = false;
-    bool blendWeight = false;
-  };
-
-  auto getDeclarationFacts = [](GuestVertexDeclaration *declaration) {
-    DeclarationFacts facts;
-    if (declaration == nullptr)
-      return facts;
-
-    for (uint32_t i = 0; i < declaration->vertexElementCount; ++i) {
-      const GuestVertexElement &e = declaration->vertexElements[i];
-      if (e.stream == 0xFF || e.type == D3DDECLTYPE_UNUSED)
-        break;
-      facts.texcoord12 |= e.stream == 0 && e.offset == 12 &&
-                          e.type == D3DDECLTYPE_FLOAT2 &&
-                          e.usage == D3DDECLUSAGE_TEXCOORD && e.usageIndex == 0;
-      facts.texcoord24 |= e.stream == 0 && e.offset == 24 &&
-                          e.type == D3DDECLTYPE_FLOAT2 &&
-                          e.usage == D3DDECLUSAGE_TEXCOORD && e.usageIndex == 0;
-      facts.blendIndices |= e.type == D3DDECLTYPE_UBYTE4 &&
-                            e.usage == D3DDECLUSAGE_BLENDINDICES &&
-                            e.usageIndex == 0;
-      facts.blendWeight |= e.type == D3DDECLTYPE_UBYTE4N &&
-                           e.usage == D3DDECLUSAGE_BLENDWEIGHT &&
-                           e.usageIndex == 0;
-    }
-    return facts;
-  };
-
-  const DeclarationFacts selectedFacts =
-      getDeclarationFacts(selectedDeclaration);
-  const bool indexed336Family = indexCount == 336;
-  const bool gpuSkin40Candidate =
-      g_inputSlots[0].stride == 40 && indexCount > 512 &&
-      g_renderTarget != nullptr && g_renderTarget->width == 1280 &&
-      g_renderTarget->height == 720 &&
-      (!selectedFacts.blendIndices || !selectedFacts.blendWeight ||
-       selectedFacts.texcoord12);
-
-  if (!indexed336Family && !gpuSkin40Candidate)
-    return;
-
-  static uint32_t s_indexed336Logs = 0;
-  static uint32_t s_gpuSkin40Logs = 0;
-  if (indexed336Family && !gpuSkin40Candidate && s_indexed336Logs++ >= 32)
-    return;
-  if (gpuSkin40Candidate) {
-    static std::unordered_set<uint64_t> s_gpuSkin40Keys;
-    uint64_t key = vsHash ^ std::rotl(psHash, 17) ^
-                   (uint64_t(indexCount) << 32) ^
-                   (uint64_t(int(g_indexBufferView.format)) << 24) ^
-                   (uint64_t(g_inputSlots[0].stride) << 16) ^
-                   (reinterpret_cast<uintptr_t>(selectedDeclaration) >> 4);
-    if (!s_gpuSkin40Keys.emplace(key).second)
-      return;
-    if (s_gpuSkin40Logs++ >= 24)
-      return;
-  }
-
-  REXGPU_WARN(
-      "{} trace: family={} prim={} baseVertex={} startIndex={} "
-      "indices={} vertexStride={} indexSize={} indexFmt={} guestDecl={}({}) "
-      "selectedDecl={}({}) rt={} rtSize={}x{} rtFmt={} viewport=({},{} "
-      "{}x{}) vsHash=0x{:016X} psHash=0x{:016X} tex12={} tex24={} "
-      "blendIdx={} blendWeight={}",
-      hookName, gpuSkin40Candidate ? "GpuSkin40Candidate" : "Indexed336",
-      primitiveType, baseVertexIndex, startIndex, indexCount,
-      g_inputSlots[0].stride, g_indexBufferView.size,
-      int(g_indexBufferView.format), (const void *)guestDeclaration,
-      KnownDeclarationName(guestDeclaration), (const void *)selectedDeclaration,
-      KnownDeclarationName(selectedDeclaration), (const void *)g_renderTarget,
-      g_renderTarget ? g_renderTarget->width : 0,
-      g_renderTarget ? g_renderTarget->height : 0,
-      g_renderTarget ? int(g_renderTarget->format) : 0, g_viewport.x,
-      g_viewport.y, g_viewport.width, g_viewport.height, vsHash, psHash,
-      selectedFacts.texcoord12, selectedFacts.texcoord24,
-      selectedFacts.blendIndices, selectedFacts.blendWeight);
-
-  static std::unordered_set<GuestVertexDeclaration *> s_loggedDeclarations;
-  if (selectedDeclaration == nullptr ||
-      !s_loggedDeclarations.emplace(selectedDeclaration).second) {
-    return;
-  }
-
-  for (uint32_t i = 0; i < selectedDeclaration->vertexElementCount; ++i) {
-    const GuestVertexElement &e = selectedDeclaration->vertexElements[i];
-    REXGPU_WARN("{} decl[{}]: stream={} offset={} type=0x{:08X} usage={} "
-                "usageIndex={}",
-                hookName, i, e.stream, e.offset, e.type, e.usage, e.usageIndex);
   }
 }
 
@@ -913,34 +556,6 @@ bool AddPendingStretchRectBarriers(GuestBaseTexture *surface) {
   return true;
 }
 
-uint32_t BoundTextureSlotMask(GuestBaseTexture *texture) {
-  uint32_t mask = 0;
-  for (uint32_t i = 0; i < std::size(g_textures); ++i) {
-    if (static_cast<GuestBaseTexture *>(g_textures[i]) == texture)
-      mask |= 1u << i;
-  }
-  return mask;
-}
-
-void LogStretchRectFormatMismatch(GuestBaseTexture *source,
-                                  GuestBaseTexture *destination) {
-  const uint64_t key =
-      (uint64_t(reinterpret_cast<uintptr_t>(source->texture)) >> 4) ^
-      (uint64_t(reinterpret_cast<uintptr_t>(destination->texture)) << 17);
-  if (!g_loggedStretchRectFormatMismatches.emplace(key).second)
-    return;
-
-  REXGPU_WARN("StretchRect format mismatch: srcTex={} srcDesc={} srcFmt={} "
-              "srcSize={}x{} dstTex={} dstDesc={} dstFmt={} dstSize={}x{} "
-              "boundSlots=0x{:04X}",
-              static_cast<const void *>(source->texture),
-              source->descriptorIndex, int(source->format), source->width,
-              source->height, static_cast<const void *>(destination->texture),
-              destination->descriptorIndex, int(destination->format),
-              destination->width, destination->height,
-              BoundTextureSlotMask(destination));
-}
-
 struct ResolveBlitScratch {
   std::unique_ptr<RenderTexture> texture;
   std::unique_ptr<RenderFramebuffer> framebuffer;
@@ -977,9 +592,6 @@ bool BlitFormatConvertedResolve(RenderCommandList *commandList,
     const RenderTexture *color = scratch.texture.get();
     scratch.framebuffer =
         Device()->createFramebuffer(RenderFramebufferDesc(&color, 1));
-    REXGPU_INFO("Resolve blit scratch: {}x{} fmt={} (src fmt={})",
-                destination->width, destination->height,
-                int(destination->format), int(source->format));
   }
 
   EnsureShaderResourceDescriptor(source);
@@ -1117,9 +729,7 @@ void ExecutePendingStretchRects(GuestBaseTexture *surface) {
     } else if (surface->format != destination->format) {
       if (fullSurface &&
           !BlitFormatConvertedResolve(commandList, surface, destination)) {
-        LogStretchRectFormatMismatch(surface, destination);
       } else if (!fullSurface) {
-        LogStretchRectFormatMismatch(surface, destination);
       }
     } else {
       AddBarrier(surface, RenderTextureLayout::COPY_SOURCE);
@@ -3275,7 +2885,6 @@ void DrawPrimitive(GuestDevice *device, uint32_t primitiveType,
 
   FlushRenderState(device);
   if (!g_pipelineBound) {
-    LogDrawSkip("DrawPrimitive", primitiveType, primitiveCount);
     if (restoreDeclaration)
       SetVertexDeclaration(device, previousDeclaration);
     return;
@@ -3299,7 +2908,6 @@ void DrawIndexedPrimitive(GuestDevice *device, uint32_t primitiveType,
                           uint32_t primitiveCount) {
   SyncVertexDeclarationFromDevice(device);
   RestoreVertexDeclarationForShader(device);
-  GuestVertexDeclaration *guestDeclaration = g_pipelineState.vertexDeclaration;
   GuestVertexDeclaration *previousDeclaration = nullptr;
   bool restoreDeclaration = SelectShaderVertexDeclaration(
       device, g_inputSlots[0].stride, &previousDeclaration);
@@ -3333,12 +2941,8 @@ void DrawIndexedPrimitive(GuestDevice *device, uint32_t primitiveType,
     UnsetInstancingStream();
 
   SetPrimitiveType(primitiveType);
-  LogSuspiciousIndexedDraw("DrawIndexedPrimitive", primitiveType,
-                           baseVertexIndex, startIndex, primitiveCount,
-                           guestDeclaration, g_pipelineState.vertexDeclaration);
   FlushRenderState(device);
   if (!g_pipelineBound) {
-    LogDrawSkip("DrawIndexedPrimitive", primitiveType, primitiveCount);
     if (restoreDeclaration)
       SetVertexDeclaration(device, previousDeclaration);
     return;
@@ -3399,7 +3003,6 @@ void DrawPrimitiveUP(GuestDevice *device, uint32_t primitiveType,
 
   FlushRenderState(device);
   if (!g_pipelineBound) {
-    LogDrawSkip("DrawPrimitiveUP", primitiveType, primitiveCount);
     if (restoreDeclaration)
       SetVertexDeclaration(device, previousDeclaration);
     return;
@@ -3441,7 +3044,6 @@ void DrawIndexedPrimitiveUP(GuestDevice *device, uint32_t primitiveType,
                             uint32_t vertexStride) {
   SyncVertexDeclarationFromDevice(device);
   RestoreVertexDeclarationForShader(device);
-  GuestVertexDeclaration *guestDeclaration = g_pipelineState.vertexDeclaration;
   GuestVertexDeclaration *previousDeclaration = nullptr;
   bool restoreDeclaration =
       SelectShaderVertexDeclaration(device, vertexStride, &previousDeclaration);
@@ -3467,9 +3069,6 @@ void DrawIndexedPrimitiveUP(GuestDevice *device, uint32_t primitiveType,
       restoreDeclaration = true;
     }
   }
-  LogSuspiciousIndexedUPDraw(
-      primitiveType, minVertexIndex, numVertices, numPrimitives, indexStride,
-      vertexStride, guestDeclaration, g_pipelineState.vertexDeclaration);
   CheckInstancing();
   if (g_pipelineState.instancing)
     UnsetInstancingStream();
@@ -3506,11 +3105,7 @@ void DrawIndexedPrimitiveUP(GuestDevice *device, uint32_t primitiveType,
                                 numVertices, numPrimitives, indexStride,
                                 vertexData, vertexStride);
   FlushRenderState(device);
-  LogShadowIndexedUPDraw(primitiveType, minVertexIndex, numVertices,
-                         numPrimitives, indexStride, vertexData, vertexStride,
-                         guestDeclaration, device, g_pipelineBound);
   if (!g_pipelineBound) {
-    LogDrawSkip("DrawIndexedPrimitiveUP", primitiveType, numPrimitives);
     if (restoreDeclaration)
       SetVertexDeclaration(device, previousDeclaration);
     return;

@@ -11,8 +11,6 @@
 #include <plume_render_interface.h>
 #include <zstd.h>
 
-#include <rex/logging.h>
-
 #include "generated/shader_cache.h"
 #include "render/guest_resources.h"
 #include "render/render_internal.h"
@@ -42,27 +40,23 @@ class DxcRuntime {
   DxcRuntime() {
     library_ = LoadLibraryW(L"dxcompiler.dll");
     if (library_ == nullptr) {
-      REXLOG_ERROR("DXC: failed to load dxcompiler.dll");
       return;
     }
 
     createInstance_ =
         reinterpret_cast<DxcCreateInstanceProc>(GetProcAddress(library_, "DxcCreateInstance"));
     if (createInstance_ == nullptr) {
-      REXLOG_ERROR("DXC: failed to get DxcCreateInstance");
       return;
     }
 
     if (FAILED(createInstance_(CLSID_DxcCompiler, __uuidof(IDxcCompiler3),
                                reinterpret_cast<void**>(&compiler_))) ||
         compiler_ == nullptr) {
-      REXLOG_ERROR("DXC: failed to create IDxcCompiler3");
       return;
     }
     if (FAILED(createInstance_(CLSID_DxcUtils, __uuidof(IDxcUtils),
                                reinterpret_cast<void**>(&utils_))) ||
         utils_ == nullptr) {
-      REXLOG_ERROR("DXC: failed to create IDxcUtils");
       return;
     }
   }
@@ -116,8 +110,6 @@ class DxcRuntime {
                                     __uuidof(IDxcResult),
                                     reinterpret_cast<void**>(&result));
     if (FAILED(hr) || result == nullptr) {
-      REXLOG_ERROR("DXC: spec constant library compile failed hr=0x%08X",
-                   static_cast<unsigned>(hr));
       return nullptr;
     }
 
@@ -138,8 +130,6 @@ class DxcRuntime {
     IDxcBlobEncoding* shaderBlob = nullptr;
     HRESULT hr = utils_->CreateBlobFromPinned(dxilData, dxilSize, DXC_CP_ACP, &shaderBlob);
     if (FAILED(hr) || shaderBlob == nullptr) {
-      REXLOG_ERROR("DXC: failed to create shader library blob hr=0x%08X",
-                   static_cast<unsigned>(hr));
       return nullptr;
     }
     return shaderBlob;
@@ -160,7 +150,6 @@ class DxcRuntime {
     HRESULT hr = createInstance_(CLSID_DxcLinker, __uuidof(IDxcLinker),
                                  reinterpret_cast<void**>(&linker));
     if (FAILED(hr) || linker == nullptr) {
-      REXLOG_ERROR("DXC: failed to create IDxcLinker hr=0x%08X", static_cast<unsigned>(hr));
       specBlob->Release();
       return nullptr;
     }
@@ -175,7 +164,6 @@ class DxcRuntime {
         SUCCEEDED(linker->RegisterLibrary(shaderLibName, shaderBlob));
     specBlob->Release();
     if (!registered) {
-      REXLOG_ERROR("DXC: failed to register shader libraries");
       linker->Release();
       return nullptr;
     }
@@ -188,7 +176,6 @@ class DxcRuntime {
                       &linkResult);
     linker->Release();
     if (FAILED(hr) || linkResult == nullptr) {
-      REXLOG_ERROR("DXC: shader link failed hr=0x%08X", static_cast<unsigned>(hr));
       return nullptr;
     }
 
@@ -199,10 +186,10 @@ class DxcRuntime {
 
  private:
   static IDxcBlob* GetResultObject(IDxcResult* result, const char* label) {
+    (void)label;
     HRESULT status = E_FAIL;
     HRESULT hr = result->GetStatus(&status);
     if (FAILED(hr) || FAILED(status)) {
-      LogResultErrors(result, label);
       return nullptr;
     }
 
@@ -210,47 +197,25 @@ class DxcRuntime {
     hr = result->GetOutput(DXC_OUT_OBJECT, __uuidof(IDxcBlob), reinterpret_cast<void**>(&object),
                            nullptr);
     if (FAILED(hr) || object == nullptr) {
-      REXLOG_ERROR("%s: failed to get object hr=0x%08X", label, static_cast<unsigned>(hr));
       return nullptr;
     }
     return object;
   }
 
   static IDxcBlob* GetOperationResultObject(IDxcOperationResult* result, const char* label) {
+    (void)label;
     HRESULT status = E_FAIL;
     HRESULT hr = result->GetStatus(&status);
     if (FAILED(hr) || FAILED(status)) {
-      IDxcBlobEncoding* errors = nullptr;
-      if (SUCCEEDED(result->GetErrorBuffer(&errors)) && errors != nullptr) {
-        REXLOG_ERROR("%s: %.*s", label, static_cast<int>(errors->GetBufferSize()),
-                     static_cast<const char*>(errors->GetBufferPointer()));
-        errors->Release();
-      } else {
-        REXLOG_ERROR("%s: failed status hr=0x%08X", label, static_cast<unsigned>(status));
-      }
       return nullptr;
     }
 
     IDxcBlob* object = nullptr;
     hr = result->GetResult(&object);
     if (FAILED(hr) || object == nullptr) {
-      REXLOG_ERROR("%s: failed to get linked object hr=0x%08X", label,
-                   static_cast<unsigned>(hr));
       return nullptr;
     }
     return object;
-  }
-
-  static void LogResultErrors(IDxcResult* result, const char* label) {
-    IDxcBlobUtf8* errors = nullptr;
-    if (SUCCEEDED(result->GetOutput(DXC_OUT_ERRORS, __uuidof(IDxcBlobUtf8),
-                                    reinterpret_cast<void**>(&errors), nullptr)) &&
-        errors != nullptr) {
-      REXLOG_ERROR("%s: %s", label, errors->GetStringPointer());
-      errors->Release();
-    } else {
-      REXLOG_ERROR("%s: failed", label);
-    }
   }
 
   HMODULE library_ = nullptr;

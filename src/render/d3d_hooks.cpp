@@ -6,11 +6,8 @@
 #include <cstring>
 #include <iterator>
 #include <unordered_map>
-#include <unordered_set>
 
 #include <rex/hook.h>
-#include <rex/logging.h>
-
 #include "render/guest_device.h"
 #include "render/guest_heap.h"
 #include "render/guest_resources.h"
@@ -381,15 +378,6 @@ void SetTexture(GuestDevice *device, uint32_t sampler, GuestTexture *texture,
   if (reo == nullptr && texture != nullptr)
     reo = rr::TranslateGuestTexture(texture,
                                     true); 
-  if (reo == nullptr && texture != nullptr) {
-    // Binding an untranslatable texture samples as zeros (black) -- warn so
-    // dropped bindings are attributable instead of silent.
-    static std::unordered_set<const void *> s_warned;
-    if (s_warned.insert(texture).second) {
-      REXGPU_WARN("SetTexture: slot {} texture {} untranslatable -- bound null",
-                  sampler, static_cast<const void *>(texture));
-    }
-  }
   rr::SetTexture(device, sampler, reo);
 }
 GuestShader *ResolveShader(GuestShader *shader) {
@@ -549,8 +537,6 @@ void SetBoundShaderState(GuestDevice *device, void *boundStateRef) {
   }
   auto it = g_boundShaderStates.find(boundState);
   if (it == g_boundShaderStates.end()) {
-    REXGPU_WARN("SetBoundShaderState: unknown bound state 0x{:08X}",
-                boundState);
     rr::SetVertexDeclaration(device, nullptr);
     rr::SetVertexShader(device, nullptr);
     rr::SetPixelShader(device, nullptr);
@@ -755,13 +741,6 @@ void SetDepthStencilSurface(GuestDevice *device, GuestSurface *surface) {
     if (translated != nullptr &&
         translated->type == rr::ResourceType::DepthStencil) {
       reo = static_cast<GuestSurface *>(translated);
-    } else if (translated != nullptr) {
-      static std::unordered_set<const void *> s_warned;
-      if (s_warned.insert(surface).second) {
-        REXGPU_WARN("SetDepthStencilSurface: {} translated to non-depth "
-                    "resource (type {}) -- bound null",
-                    (const void *)surface, int(translated->type));
-      }
     }
   }
   rr::SetDepthStencilSurface(device, reo);
@@ -842,13 +821,6 @@ void Resolve(GuestDevice *device, uint32_t flags, const rr::GuestRect *source,
   GuestBaseTexture *reo = AsReo(destination);
   if (reo == nullptr && destination != nullptr) {
     reo = rr::TranslateGuestTexture(destination, false);
-  }
-  if (reo == nullptr && destination != nullptr) {
-    static std::unordered_set<const void *> s_warned;
-    if (s_warned.insert(destination).second) {
-      REXGPU_WARN("Resolve: destination {} untranslatable -- resolve DROPPED",
-                  static_cast<const void *>(destination));
-    }
   }
   rr::StretchRect(device, flags, source, reo, destPoint);
 }

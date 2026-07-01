@@ -11,8 +11,6 @@
 
 #include <plume_render_interface.h>
 #include <plume_render_interface_builders.h>
-#include <rex/logging.h>
-
 #include "render/guest_resources.h"
 #include "render/render_internal.h"
 #include "render/shaders/copy_ps.hlsl.dxil.h"
@@ -132,12 +130,8 @@ bool Video::Init(void *nativeWindowHandle, uint32_t width, uint32_t height) {
   }
 
   if (g_device == nullptr) {
-    REXGPU_ERROR("Video::Init - failed to create a Plume render device");
     return false;
   }
-
-  REXGPU_INFO("Video::Init - device created: {}",
-              g_device->getDescription().name);
 
   g_queue = g_device->createCommandQueue(RenderCommandListType::DIRECT);
   g_commandList = g_queue->createCommandList();
@@ -243,8 +237,6 @@ bool Video::Init(void *nativeWindowHandle, uint32_t width, uint32_t height) {
       g_copy_ps_dxil, sizeof(g_copy_ps_dxil), "main", RenderShaderFormat::DXIL);
 
   g_initialized = true;
-  REXGPU_INFO("Video::Init - swapchain {}x{} valid={}", g_swapChain->getWidth(),
-              g_swapChain->getHeight(), g_swapChainValid);
   return true;
 }
 
@@ -257,14 +249,6 @@ RenderDevice *Device() { return g_device.get(); }
 
 void SetPresentSource(GuestBaseTexture *frontBuffer) {
   g_presentSource = frontBuffer;
-  static bool s_logged = false;
-  if (!s_logged && frontBuffer != nullptr) {
-    s_logged = true;
-    REXGPU_INFO("Present source: {}x{} format={} (swapchain {}x{} format={})",
-                frontBuffer->width, frontBuffer->height,
-                int(frontBuffer->format), g_swapChain->getWidth(),
-                g_swapChain->getHeight(), int(kBackbufferFormat));
-  }
 }
 
 void EnsureFrameStarted() {

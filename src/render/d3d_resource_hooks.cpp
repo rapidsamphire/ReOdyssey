@@ -15,7 +15,6 @@
 #include <plume_render_interface.h>
 #include <rex/hash.h> // pulls in xxhash (XXH3_64bits)
 #include <rex/logging.h>
-
 #include "generated/shader_cache.h"
 #include "render/guest_heap.h"
 #include "render/guest_resources.h"
@@ -62,12 +61,6 @@ RenderFormat ConvertFormat(uint32_t d3dFormat) {
     return RenderFormat::D32_FLOAT_S8_UINT;
   }
 
-  static std::unordered_set<uint32_t> s_warnedFormats;
-  if (s_warnedFormats.insert(d3dFormat).second) {
-    REXGPU_WARN("ConvertFormat: unknown D3DFORMAT 0x{:08X} (gpu format {}) -- "
-                "defaulting to R8G8B8A8",
-                d3dFormat, d3dFormat & 0x3F);
-  }
   return RenderFormat::R8G8B8A8_UNORM;
 }
 
@@ -455,8 +448,6 @@ static GuestShader *CreateShaderFromFunction(const uint32_t *function,
       auto *shader = GuestNew<GuestShader>(type);
       shader->shaderCacheEntry = entry;
       entry->guest_shader = reinterpret_cast<::GuestShader *>(shader);
-      REXGPU_INFO("CreateShader: hash=0x{:016X} type={} -> guestAddr=0x{:08X}",
-                  hash, int(type), ToGuest(shader));
       return shader;
     }
     return reinterpret_cast<GuestShader *>(entry->guest_shader);
@@ -473,7 +464,7 @@ static GuestShader *CreateShaderFromFunction(const uint32_t *function,
       std::fclose(f);
     }
     REXGPU_WARN(
-        "Shader cache MISS: hash=0x{:016X} size={} type={} — dumped to {}",
+        "Shader cache MISS: hash=0x{:016X} size={} type={} dumped to {}",
         hash, size, int(type), path);
   }
   return GuestNew<GuestShader>(type);
@@ -589,11 +580,6 @@ XenosTextureInfo ParseTextureFetchConstant(const rex::be<uint32_t> *fc) {
     info.bytesPerBlock = 8;
     break;
   default: {
-    static std::unordered_set<uint32_t> s_warnedFormats;
-    if (s_warnedFormats.insert(gpuFormat).second) {
-      REXGPU_WARN("TranslateGuestTexture: unsupported Xenos format {} ({}x{})",
-                  gpuFormat, info.width, info.height);
-    }
     return info;
   }
   }
@@ -692,23 +678,10 @@ GuestTexture *TranslateGuestTexture(void *guestHeader, bool uploadGuestData) {
 
   const auto *header = reinterpret_cast<const rex::be<uint32_t> *>(guestHeader);
   if ((header[0].get() & 0xF) != 3) {
-    static std::unordered_set<uint32_t> s_warned;
-    if (s_warned.insert(guestAddress).second) {
-      REXGPU_WARN("TranslateGuestTexture: 0x{:08X} unhandled resource type "
-                  "nibble {} (common=0x{:08X})",
-                  guestAddress, header[0].get() & 0xF, header[0].get());
-    }
     return nullptr;
   }
   XenosTextureInfo info = ParseTextureFetchConstant(header + 7);
   if (!info.valid) {
-    static std::unordered_set<uint32_t> s_warned;
-    if (s_warned.insert(guestAddress).second) {
-      REXGPU_WARN("TranslateGuestTexture: 0x{:08X} invalid fetch constant "
-                  "({}x{} fmt={} base=0x{:08X})",
-                  guestAddress, info.width, info.height, int(info.format),
-                  info.baseAddress);
-    }
     return nullptr;
   }
 
@@ -770,12 +743,6 @@ GuestTexture *TranslateGuestTexture(void *guestHeader, bool uploadGuestData) {
 
       if (uploadGuestData)
         UploadGuestTextureData(texture, info);
-
-      REXGPU_INFO("TranslateGuestTexture: 0x{:08X} base=0x{:08X} {}x{} fmt={} "
-                  "tiled={} endian={} upload={} -> desc {}",
-                  guestAddress, info.baseAddress, info.width, info.height,
-                  int(info.format), info.tiled, info.endian, uploadGuestData,
-                  texture->descriptorIndex);
       std::lock_guard lock(g_guestTextureAliasMutex);
       result = texture;
       g_guestTextureStorage.push_back(std::move(textureStorage));
@@ -807,12 +774,6 @@ GuestBaseTexture *TranslateGuestSurface(void *guestHeader) {
       if (parent->texture != nullptr)
         return parent;
     }
-    static std::unordered_set<uint32_t> s_warned;
-    if (s_warned.insert(guestAddress).second) {
-      REXGPU_WARN("TranslateGuestSurface: 0x{:08X} texture-child surface with "
-                  "unresolvable parent 0x{:08X} (level {}, common=0x{:08X})",
-                  guestAddress, parentAddress, level, common);
-    }
     return nullptr;
   }
 
@@ -822,12 +783,6 @@ GuestBaseTexture *TranslateGuestSurface(void *guestHeader) {
   const uint32_t msaaType = (header[6].get() >> 16) & 3; // +0x18 top halfword
   const uint32_t guestFormat = header[10].get();         // +0x28
   if (width <= 1 || height <= 1 || width > 8192 || height > 8192) {
-    static std::unordered_set<uint32_t> s_warned;
-    if (s_warned.insert(guestAddress).second) {
-      REXGPU_WARN("TranslateGuestSurface: 0x{:08X} implausible size {}x{} "
-                  "(size=0x{:08X} fmt=0x{:08X})",
-                  guestAddress, width, height, sizeDword, guestFormat);
-    }
     return nullptr;
   }
 
@@ -885,12 +840,6 @@ GuestBaseTexture *TranslateGuestSurface(void *guestHeader) {
         surface->descriptorIndex, surface->texture,
         RenderTextureLayout::SHADER_READ, surface->textureView.get());
   }
-
-  REXGPU_INFO("TranslateGuestSurface: 0x{:08X} {}x{} fmt=0x{:08X} ({}) msaa={} "
-              "{} -> desc {}",
-              guestAddress, width, height, guestFormat, int(format),
-              int(sampleCount), depth ? "depth" : "color",
-              surface->descriptorIndex);
 
   std::lock_guard lock(g_guestSurfaceAliasMutex);
   g_guestSurfaceAliases[guestAddress] = surface;
