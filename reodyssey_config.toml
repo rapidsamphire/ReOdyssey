@@ -42,6 +42,7 @@ lstrcmpiA = 0x827C9F80
 0x822952E8 = { name = "rex_GetBind_UInput_QBA_AVFString_VFName_Z" }
 0x82295488 = { name = "rex_FindItemIndex_TArray_VFName_07_QBAHABVFName_Z" }
 0x826936D8 = {} 
+0x826F7AA0 = {}
 0x826F7AA8 = {}
 0x82E75C60 = {}
 0x82295EE0 = { name = "rex_ParseLine_YAHPAPB_WPA_WHH_Z" }
